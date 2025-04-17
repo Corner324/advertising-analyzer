@@ -7,6 +7,19 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.12"
+tqdm = "^4.67.1"
+opencv-python = "^4.11.0.86"
+pandas = "^2.2.3"
+fastapi = {extras = ["standard"], version = "^0.115.12"}
+uvicorn = "^0.34.1"
+ultralytics = "8.3.13"
+torch = { version = "2.4.1", source = "pytorch-cpu" }
+torchvision = { version = "0.19.1", source = "pytorch-cpu" }
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 
 [build-system]

@@ -1,0 +1,12 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./videos:/app/videos
+      - ./predictions:/app/predictions
+      - ./reports:/app/reports
+      - ./debug_frames:/app/debug_frames
+    environment:
+      - PYTHONUNBUFFERED=1
