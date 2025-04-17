@@ -8,5 +8,30 @@ services:
       - ./predictions:/app/predictions
       - ./reports:/app/reports
       - ./debug_frames:/app/debug_frames
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: '4G'
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

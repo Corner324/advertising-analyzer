@@ -7,6 +7,6 @@ RUN npm install
 
 COPY . .
 
-RUN npm run build
+EXPOSE 8080
 
-CMD ["npm", "run", "serve"]
+CMD ["npx", "vite", "--host", "--port", "8080"]
