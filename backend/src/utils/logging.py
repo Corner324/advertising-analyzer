@@ -1,12 +1,12 @@
 import logging
 
 
-def setup_logging(log_file: str = "ad_quality.log", level: int = logging.INFO):
+def setup_logging(log_file: str = "logs/ad_quality.log", level: int = logging.INFO):
     """
     Настраивает логирование в файл и консоль с указанным уровнем.
 
     Args:
-        log_file (str): Путь к файлу логов. По умолчанию "ad_quality.log".
+        log_file (str): Путь к файлу логов. По умолчанию "logs/ad_quality.log".
         level (int): Уровень логирования (например, logging.INFO). По умолчанию logging.INFO.
     """
     # Очищаем существующие обработчики, чтобы избежать дублирования

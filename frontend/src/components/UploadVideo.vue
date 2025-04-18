@@ -2,12 +2,16 @@
   <div class="min-h-screen bg-gray-100 flex items-center justify-center p-4">
     <div class="max-w-3xl w-full bg-white rounded-xl shadow-2xl p-8">
       <!-- Заголовок -->
-      <h2 class="text-3xl font-bold text-gray-900 mb-6">Анализ рекламного видео</h2>
+      <h2 class="text-3xl font-bold text-gray-900 mb-6 text-center">Анализ рекламного видео</h2>
 
       <!-- Зона drag-and-drop -->
       <div
-        class="border-2 border-dashed border-gray-300 rounded-lg p-10 text-center transition-all duration-300"
-        :class="{ 'border-blue-600 bg-blue-50': isDragging }"
+        class="border-2 border-dashed rounded-lg p-10 text-center transition-all duration-300"
+        :class="{
+          'border-blue-600 bg-blue-50': isDragging,
+          'border-green-600 bg-green-100': success && !file,
+          'border-gray-300': !isDragging && !success
+        }"
         @dragover.prevent="isDragging = true"
         @dragleave.prevent="isDragging = false"
         @drop.prevent="handleDrop"
@@ -40,7 +44,9 @@
             class="text-red-500 hover:text-red-600"
             @click="clearFile"
           >
-            Удалить
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </button>
         </div>
       </div>
@@ -90,7 +96,15 @@
 
       <!-- Отчет -->
       <div v-if="report" class="mt-8 animate-fade-in">
-        <h3 class="text-2xl font-semibold text-gray-900 mb-4">Результаты анализа</h3>
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-2xl font-semibold text-gray-900">Результаты анализа</h3>
+          <button
+            class="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 transition-all duration-200"
+            @click="saveAsPDF"
+          >
+            Сохранить в PDF
+          </button>
+        </div>
         <div class="bg-gray-50 p-6 rounded-lg shadow-inner">
           <div v-for="(item, index) in formatReport" :key="index" class="mb-6 last:mb-0">
             <div class="border-l-4 border-blue-600 pl-4">
@@ -106,6 +120,7 @@
 <script>
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
+// import jsPDF from 'jspdf';
 
 axiosRetry(axios, {
   retries: 3,
@@ -124,11 +139,16 @@ export default {
       uploadProgress: 0,
       logs: [],
       backendAvailable: false,
+      success: false,
     };
   },
   computed: {
     formatReport() {
-      return this.report.split('\n\n').filter(item => item.trim());
+      if (!this.file) return this.report.split('\n\n').filter(item => item.trim());
+      const regex = /Реклама в видео [0-9a-f-]+\.mp4/;
+      return this.report.split('\n\n').filter(item => item.trim()).map(item =>
+        item.replace(regex, `Реклама в видео ${this.file.name}`)
+      );
     },
   },
   methods: {
@@ -140,7 +160,7 @@ export default {
     },
     handleFileUpload(event) {
       const file = event.target.files[0];
-      if (file && file.size > 500 * 1024 * 1024) { // 500 МБ
+      if (file && file.size > 500 * 1024 * 1024) {
         this.status = 'Ошибка: Файл слишком большой (максимум 500 МБ)';
         this.log('Файл слишком большой', 'error');
         return;
@@ -150,6 +170,7 @@ export default {
       this.status = '';
       this.report = '';
       this.uploadProgress = 0;
+      this.success = false;
       this.log(`Файл выбран: ${file?.name}, размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     },
     handleDrop(event) {
@@ -164,6 +185,7 @@ export default {
       this.status = '';
       this.report = '';
       this.uploadProgress = 0;
+      this.success = false;
       this.log(`Файл перетащен: ${file?.name}, размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     },
     clearFile() {
@@ -171,6 +193,7 @@ export default {
       this.status = '';
       this.report = '';
       this.uploadProgress = 0;
+      this.success = false;
       this.log('Файл удалён');
     },
     async checkBackend() {
@@ -190,6 +213,33 @@ export default {
       }
       return this.backendAvailable;
     },
+    async saveAsPDF() {
+      this.log('Генерация PDF отчета');
+      try {
+        // const doc = new jsPDF();
+        doc.setFontSize(16);
+        doc.text('Результаты анализа рекламного видео', 10, 10);
+        let yOffset = 20;
+        this.formatReport.forEach((item, index) => {
+          doc.setFontSize(12);
+          const lines = doc.splitTextToSize(item, 180);
+          lines.forEach(line => {
+            if (yOffset > 280) {
+              doc.addPage();
+              yOffset = 10;
+            }
+            // doc.text(line, 10, yOffset);
+            yOffset += 7;
+          });
+          yOffset += 5;
+        });
+        doc.save(`report_${this.file ? this.file.name.replace(/\.[^/.]+$/, '') : 'analysis'}.pdf`);
+        this.log('PDF сохранен');
+      } catch (error) {
+        this.status = 'Ошибка: Не удалось сохранить PDF';
+        this.log(`Ошибка генерации PDF: ${error.message}`, 'error');
+      }
+    },
     async uploadVideo() {
       if (!this.file) {
         this.status = 'Ошибка: Файл не выбран';
@@ -200,6 +250,7 @@ export default {
       this.isLoading = true;
       this.status = 'Проверка соединения...';
       this.uploadProgress = 0;
+      this.success = false;
       const startTime = Date.now();
       this.log(`Начало загрузки файла: ${this.file.name}, размер: ${(this.file.size / 1024 / 1024).toFixed(2)} МБ`);
 
@@ -212,11 +263,12 @@ export default {
 
       const formData = new FormData();
       formData.append('file', this.file);
+      formData.append('filename', this.file.name);
 
       try {
         this.log('Отправка POST-запроса на /api/upload');
         const response = await axios.post('/api/upload', formData, {
-          timeout: 120000, // 120 секунд
+          timeout: 120000,
           headers: {
             'Content-Type': 'multipart/form-data',
             'X-Debug': 'upload-request',
@@ -231,8 +283,9 @@ export default {
         this.log(`Ответ получен: ${response.status} ${response.statusText}, время: ${Date.now() - startTime} мс`);
         this.log(`Данные ответа: ${JSON.stringify(response.data)}`);
 
-        this.status = 'Видео обработано!';
-        const reportUrl = `/api/report/${response.data.report_path.split('/').pop()}`;
+        this.success = true;
+        const reportId = response.data.report_path.split('/').pop().replace('_report.txt', '');
+        const reportUrl = `/api/report/${reportId}`;
         this.log(`Запрос отчета: ${reportUrl}`);
 
         const reportResponse = await axios.get(reportUrl, {

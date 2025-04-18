@@ -69,7 +69,8 @@ async def upload_video(file: UploadFile = File(...)):
     # Сохраняем видео
     video_id = str(uuid.uuid4())
     video_path = VIDEO_DIR / f"{video_id}.mp4"
-    logger.info(f"Сохранение видео в: {video_path}")
+    filename = file.filename
+    logger.info(f"Сохранение видео в: {video_path}, имя файла: {filename}")
 
     try:
         with open(video_path, "wb") as f:
@@ -81,7 +82,7 @@ async def upload_video(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Ошибка сохранения видео: {str(e)}")
 
     # Запускаем детекцию
-    predictions_path = PREDICTIONS_DIR / f"{video_id}_predictions.json"
+    predictions_path = PREDICTIONS_DIR / f"{video_id}_ predictions.json"
     logger.info(f"Запуск детекции, предсказания будут сохранены в: {predictions_path}")
 
     try:
@@ -96,7 +97,7 @@ async def upload_video(file: UploadFile = File(...)):
     # Запускаем анализ
     logger.info(f"Запуск анализа видео: {video_path}")
     try:
-        results = analyzer.process_video(str(video_path), str(predictions_path))
+        results = analyzer.process_video(str(video_path), str(predictions_path), filename)
         if not results:
             logger.error(f"Анализ не вернул результатов для видео: {video_path}")
             raise HTTPException(status_code=500, detail="Ошибка анализа видео")

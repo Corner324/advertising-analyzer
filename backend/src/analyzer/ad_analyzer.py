@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -11,18 +10,17 @@ import cv2
 import numpy as np
 from scipy.spatial import cKDTree
 from src.utils.logging import setup_logging
+from tqdm import tqdm
 
+setup_logging(level=logging.INFO)
 
-setup_logging(level=logging.INFO)  # Уменьшаем уровень логирования
-
-# Подавление логов OpenCV и FFmpeg
 cv2.setLogLevel(0)
 os.environ["OPENCV_LOG_LEVEL"] = "FATAL"
 os.environ["OPENCV_FFMPEG_LOG_LEVEL"] = "fatal"
 os.environ["LIBAV_LOG_LEVEL"] = "0"
 os.environ["AV_LOG_LEVEL"] = "0"
+os.environ["FFMPEG_THREADS"] = "1"
 
-# Константы
 VIDEO_DIR = "videos"
 MOCK_DATA_PATH = "Starbucks_predictions.json"
 OUTPUT_FILE = "ad_quality_report.txt"
@@ -30,12 +28,13 @@ MIN_SIZE_RATIO = 0.003
 MIN_AREA = 2000
 MAX_AREA = 200000
 MIN_CONFIDENCE = 0.7
-ALLOWED_CLASSES = [4]  # Starbucks
+ALLOWED_CLASSES = [4]
 IOU_THRESHOLD = 0.2
 MERGE_IOU_THRESHOLD = 0.15
 MAX_TIME_GAP_SECONDS = 4.0
 MIN_DURATION = 0.05
-FRAME_SKIP = 5  # Анализируем каждый 5-й кадр
+FRAME_SKIP = 5
+MAX_CACHE_SIZE = 10
 
 
 @dataclass
@@ -74,7 +73,10 @@ class VideoProcessor:
         self.frame_rate = 0.0
         self.frame_width = 0
         self.frame_height = 0
-        self.frame_cache = {}  # Кэш кадров
+        self.frame_cache = {}
+        self.frame_count = 0
+        self.scale_width = 640
+        self.scale_height = 360
 
     def initialize(self) -> bool:
         with suppress_outputs():
@@ -88,9 +90,14 @@ class VideoProcessor:
             self.frame_rate = self.cap.get(cv2.CAP_PROP_FPS)
             self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if self.frame_count <= 0 or self.frame_rate <= 0:
+                logging.error(f"Некорректное видео: кадров={self.frame_count}, FPS={self.frame_rate}")
+                self.cap.release()
+                return False
             logging.info(
                 f"Видео открыто: {self.video_path}, "
-                f"разрешение={self.frame_width}x{self.frame_height}, FPS={self.frame_rate}"
+                f"разрешение={self.frame_width}x{self.frame_height}, FPS={self.frame_rate}, кадров={self.frame_count}"
             )
             return True
 
@@ -99,17 +106,38 @@ class VideoProcessor:
             if self.cap is None:
                 logging.error("VideoCapture не инициализирован")
                 return None
-            if frame_id in self.frame_cache:
-                return self.frame_cache[frame_id]
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
-            ret, frame = self.cap.read()
-            if not ret:
-                logging.warning(f"Не удалось прочитать кадр {frame_id}")
+            if frame_id >= self.frame_count:
+                logging.warning(f"Кадр {frame_id} превышает количество кадров ({self.frame_count})")
                 return None
-            # Масштабируем кадр для ускорения анализа
-            frame = cv2.resize(frame, (640, 360))
-            self.frame_cache[frame_id] = frame
-            return frame
+            if frame_id in self.frame_cache:
+                logging.debug(f"Кадр {frame_id} взят из кэша")
+                return self.frame_cache[frame_id]
+            try:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
+                ret, frame = self.cap.read()
+                if not ret:
+                    logging.warning(f"Не удалось прочитать кадр {frame_id}")
+                    return None
+                frame = cv2.resize(frame, (self.scale_width, self.scale_height))
+                if len(self.frame_cache) >= MAX_CACHE_SIZE:
+                    oldest_frame = min(self.frame_cache.keys())
+                    del self.frame_cache[oldest_frame]
+                self.frame_cache[frame_id] = frame
+                logging.debug(f"Кадр {frame_id} добавлен в кэш, размер кэша: {len(self.frame_cache)}")
+                return frame
+            except Exception as e:
+                logging.error(f"Ошибка чтения кадра {frame_id}: {str(e)}")
+                return None
+
+    def scale_bbox(self, bbox: BBox) -> BBox:
+        scale_x = self.scale_width / self.frame_width
+        scale_y = self.scale_height / self.frame_height
+        return BBox(
+            x=int(bbox.x * scale_x),
+            y=int(bbox.y * scale_y),
+            width=int(bbox.width * scale_x),
+            height=int(bbox.height * scale_y),
+        )
 
     def release(self):
         with suppress_outputs():
@@ -117,6 +145,7 @@ class VideoProcessor:
                 self.cap.release()
                 self.cap = None
             self.frame_cache.clear()
+            logging.debug("VideoCapture освобождён, кэш очищен")
 
 
 @contextlib.contextmanager
@@ -138,6 +167,8 @@ class BBoxValidator:
         return (
             bbox["x"] >= 0
             and bbox["y"] >= 0
+            and bbox["x"] + bbox["width"] <= frame_width
+            and bbox["y"] + bbox["height"] <= frame_height
             and bbox["width"] > 0
             and bbox["height"] > 0
             and size_norm >= MIN_SIZE_RATIO
@@ -186,6 +217,17 @@ class BBoxMetrics:
 class AdAnalyzer:
     @staticmethod
     def analyze(frame: np.ndarray, bbox: BBox, frame_width: int, frame_height: int, group_id: int) -> AdMetrics:
+        if (
+            bbox.x < 0
+            or bbox.y < 0
+            or bbox.width <= 0
+            or bbox.height <= 0
+            or bbox.x + bbox.width > frame_width
+            or bbox.y + bbox.height > frame_height
+        ):
+            logging.warning(f"Некорректный bbox для группы {group_id}: {bbox.__dict__}")
+            return AdMetrics(0.0, 0.0, "не определено", 0.0)
+
         padding = 0.2
         x_start = max(0, bbox.x - int(bbox.width * padding))
         y_start = max(0, bbox.y - int(bbox.height * padding))
@@ -194,9 +236,10 @@ class AdAnalyzer:
         ad_region = frame[y_start:y_end, x_start:x_end]
 
         if ad_region.size == 0 or ad_region.shape[0] < 2 or ad_region.shape[1] < 2:
-            logging.warning(f"Пустая область рекламы для группы {group_id}")
+            logging.warning(f"Пустая область рекламы для группы {group_id}, bbox: {bbox.__dict__}")
             ad_region = frame[bbox.y : bbox.y + bbox.height, bbox.x : bbox.x + bbox.width]
             if ad_region.size == 0:
+                logging.error(f"Не удалось получить область рекламы для группы {group_id}")
                 return AdMetrics(0.0, 0.0, "не определено", 0.0)
 
         size = bbox.width * bbox.height
@@ -241,11 +284,10 @@ class AdGroupProcessor:
         validator = BBoxValidator()
         metrics = BBoxMetrics()
         ad_groups = []
-        # Предварительная фильтрация bbox’ов
         valid_bboxes = []
         for frame_data in frames_data:
             frame_id = frame_data["frame_id"]
-            if frame_id % FRAME_SKIP != 0:  # Пропускаем кадры
+            if frame_id % FRAME_SKIP != 0:
                 continue
             for ad in frame_data["ads"]:
                 bbox = ad["bbox"]
@@ -253,13 +295,13 @@ class AdGroupProcessor:
                 class_id = ad.get("class_id", -1)
                 if validator.is_valid(bbox, self.frame_width, self.frame_height, confidence, class_id):
                     valid_bboxes.append((frame_id, bbox))
-        # Пространственная индексация
+                else:
+                    logging.debug(f"Отфильтрован некорректный bbox: {bbox}")
         if valid_bboxes:
             centers = np.array([[b[1]["x"] + b[1]["width"] / 2, b[1]["y"] + b[1]["height"] / 2] for b in valid_bboxes])
             tree = cKDTree(centers)
             for i, (frame_id, bbox) in enumerate(valid_bboxes):
                 found_group = False
-                # Ищем только ближайшие bbox’ы
                 indices = tree.query_ball_point([bbox["x"] + bbox["width"] / 2, bbox["y"] + bbox["height"] / 2], r=200)
                 for j in indices:
                     if j >= i:
@@ -302,22 +344,26 @@ class AdGroupProcessor:
         logging.info(f"После объединения: {len(merged_groups)} групп")
         return merged_groups
 
-    def process_groups(self, groups: List[AdGroup], video_processor: VideoProcessor) -> List[str]:
+    def process_groups(self, groups: List[AdGroup], video_processor: VideoProcessor, filename: str) -> List[str]:
         analyzer = AdAnalyzer()
         results = []
-
-        def process_group(group_id, group):
+        for group_id, group in enumerate(tqdm(groups, desc="Анализ групп рекламы")):
             frame_ids = [f[0] for f in group.frames]
             duration = (max(frame_ids) - min(frame_ids) + 1) / self.frame_rate if frame_ids else 0.0
             if duration < MIN_DURATION:
-                return None
+                logging.info(f"Пропущена группа {group_id} с длительностью {duration:.2f} сек")
+                continue
             frame = video_processor.read_frame(frame_ids[0])
             if frame is None:
-                return None
-            metrics = analyzer.analyze(frame, group.bbox, self.frame_width, self.frame_height, group_id)
+                logging.warning(f"Не удалось обработать группу {group_id}: кадр не прочитан")
+                continue
+            scaled_bbox = video_processor.scale_bbox(group.bbox)
+            metrics = analyzer.analyze(
+                frame, scaled_bbox, video_processor.scale_width, video_processor.scale_height, group_id
+            )
             quality = analyzer.evaluate_quality(metrics, duration)
             result = (
-                f"Реклама в видео {os.path.basename(video_processor.video_path)}:\n"
+                f"Реклама в видео {filename}:\n"
                 f"  - Положение: {metrics.pos_label}\n"
                 f"  - Размер: {metrics.size_norm:.2%} от кадра\n"
                 f"  - Контрастность: {metrics.contrast_norm:.2f}\n"
@@ -325,19 +371,11 @@ class AdGroupProcessor:
                 f"  - Оценка качества: {quality.label} (балл: {quality.score:.2f})\n"
                 f"  - Рекомендация: {quality.recommendation}\n"
             )
+            results.append(result)
             logging.info(
                 f"Группа {group_id}: кадры {min(frame_ids)}-{max(frame_ids)}, "
                 f"длительность {duration:.1f} сек, размер {metrics.size_norm:.2%}"
             )
-            return result
-
-        # Параллельная обработка групп
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(process_group, i, g) for i, g in enumerate(groups)]
-            for future in futures:
-                result = future.result()
-                if result:
-                    results.append(result)
         return results
 
 
@@ -347,23 +385,30 @@ class AdQualityAnalyzer:
         self.debug_dir = debug_dir
         os.makedirs(self.debug_dir, exist_ok=True)
 
-    def process_video(self, video_path: str, predictions_path: str) -> List[str]:
-        video_processor = VideoProcessor(video_path)
-        if not video_processor.initialize():
+    def process_video(self, video_path: str, predictions_path: str, filename: str) -> List[str]:
+        try:
+            video_processor = VideoProcessor(video_path)
+            if not video_processor.initialize():
+                logging.error("Не удалось инициализировать видео")
+                return []
+            with open(predictions_path, "r", encoding="utf-8") as f:
+                video_data = json.load(f)[0]
+            group_processor = AdGroupProcessor(
+                video_processor.frame_rate, video_processor.frame_width, video_processor.frame_height
+            )
+            ad_groups = group_processor.group_ads(video_data["frames"])
+            results = group_processor.process_groups(ad_groups, video_processor, filename)
+            video_processor.release()
+            return results
+        except Exception as e:
+            logging.error(f"Ошибка обработки видео {video_path}: {str(e)}")
             return []
-        # Чтение JSON без Pandas
-        with open(predictions_path, "r", encoding="utf-8") as f:
-            video_data = json.load(f)[0]  # Предполагаем один видеофайл
-        group_processor = AdGroupProcessor(
-            video_processor.frame_rate, video_processor.frame_width, video_processor.frame_height
-        )
-        ad_groups = group_processor.group_ads(video_data["frames"])
-        results = group_processor.process_groups(ad_groups, video_processor)
-        video_processor.release()
-        return results
 
     def save_report(self, results: List[str], output_file: str):
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write("Отчет по качеству отображения рекламы\n\n")
-            f.write("\n".join(results))
-        logging.info(f"Отчет сохранен: {len(results)} записей")
+        try:
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write("Отчет по качеству отображения рекламы\n\n")
+                f.write("\n".join(results))
+            logging.info(f"Отчет сохранен: {len(results)} записей")
+        except Exception as e:
+            logging.error(f"Ошибка сохранения отчета {output_file}: {str(e)}")
