@@ -34,4 +34,4 @@ COPY src/detector/models/best.pt ./src/detector/models/best.pt
 ENV PYTHONUNBUFFERED=1
 
 # Запускаем приложение
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src"]

@@ -4,6 +4,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./backend/src:/app/src
       - ./videos:/app/videos
       - ./predictions:/app/predictions
       - ./reports:/app/reports
