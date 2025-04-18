@@ -99,8 +99,8 @@
         <div class="flex justify-between items-center mb-4">
           <h3 class="text-2xl font-semibold text-gray-900">Результаты анализа</h3>
           <button
-            class="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 transition-all duration-200"
-            @click="saveAsPDF"
+            class="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2 rounded-lg opacity-50 cursor-not-allowed"
+            :disabled="true"
           >
             Сохранить в PDF
           </button>
@@ -120,7 +120,6 @@
 <script>
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
-// import jsPDF from 'jspdf';
 
 axiosRetry(axios, {
   retries: 3,
@@ -213,33 +212,6 @@ export default {
       }
       return this.backendAvailable;
     },
-    async saveAsPDF() {
-      this.log('Генерация PDF отчета');
-      try {
-        // const doc = new jsPDF();
-        doc.setFontSize(16);
-        doc.text('Результаты анализа рекламного видео', 10, 10);
-        let yOffset = 20;
-        this.formatReport.forEach((item, index) => {
-          doc.setFontSize(12);
-          const lines = doc.splitTextToSize(item, 180);
-          lines.forEach(line => {
-            if (yOffset > 280) {
-              doc.addPage();
-              yOffset = 10;
-            }
-            // doc.text(line, 10, yOffset);
-            yOffset += 7;
-          });
-          yOffset += 5;
-        });
-        doc.save(`report_${this.file ? this.file.name.replace(/\.[^/.]+$/, '') : 'analysis'}.pdf`);
-        this.log('PDF сохранен');
-      } catch (error) {
-        this.status = 'Ошибка: Не удалось сохранить PDF';
-        this.log(`Ошибка генерации PDF: ${error.message}`, 'error');
-      }
-    },
     async uploadVideo() {
       if (!this.file) {
         this.status = 'Ошибка: Файл не выбран';
@@ -283,7 +255,6 @@ export default {
         this.log(`Ответ получен: ${response.status} ${response.statusText}, время: ${Date.now() - startTime} мс`);
         this.log(`Данные ответа: ${JSON.stringify(response.data)}`);
 
-        this.success = true;
         const reportId = response.data.report_path.split('/').pop().replace('_report.txt', '');
         const reportUrl = `/api/report/${reportId}`;
         this.log(`Запрос отчета: ${reportUrl}`);
@@ -294,6 +265,8 @@ export default {
         });
         this.log(`Отчет получен: ${reportResponse.status} ${reportResponse.statusText}, время: ${Date.now() - startTime} мс`);
         this.report = reportResponse.data;
+        this.success = true; // Устанавливаем success для зелёной зоны
+        this.status = ''; // Очищаем статус
       } catch (error) {
         let errorMessage = 'Неизвестная ошибка';
         if (error.response) {

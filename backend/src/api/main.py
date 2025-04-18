@@ -12,7 +12,7 @@ from src.detector.yolo_detector import YoloDetector
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("/app/logs/api.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("/app/logs/ad_quality.log")],
 )
 logger = logging.getLogger(__name__)
 
