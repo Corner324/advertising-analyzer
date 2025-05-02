@@ -86,11 +86,26 @@
 
       <!-- Экран ожидания -->
       <div v-if="isLoading" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
-        <div class="bg-white rounded-xl p-8 flex flex-col items-center shadow-lg">
+        <div class="bg-white rounded-xl p-8 flex flex-col items-center shadow-lg w-full max-w-2xl">
           <div class="animate-spin rounded-full h-12 w-12 border-t-4 border-blue-600"></div>
           <p class="mt-4 text-gray-800 font-medium">
             {{ uploadProgress === 100 ? 'Обработка видео...' : 'Загрузка видео...' }}
           </p>
+          <div v-if="processingProgress < 100 && uploadProgress === 100" class="w-full mt-4">
+            <div class="w-full bg-gray-200 rounded-full h-2.5">
+              <div
+                class="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                :style="{ width: `${processingProgress}%` }"
+              ></div>
+            </div>
+            <p class="text-sm text-gray-600 mt-2">Обработка: {{ processingProgress.toFixed(2) }}%</p>
+          </div>
+          <div v-if="backendLogs.length > 0" class="mt-4 w-full max-h-64 overflow-y-auto bg-gray-100 p-4 rounded-lg">
+            <p class="text-sm text-gray-800 font-medium mb-2">Логи обработки:</p>
+            <div v-for="(log, index) in backendLogs" :key="index" class="text-xs text-gray-700 mb-1">
+              {{ log }}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -120,6 +135,7 @@
 <script>
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
+import { v4 as uuidv4 } from 'uuid';
 
 axiosRetry(axios, {
   retries: 3,
@@ -136,9 +152,14 @@ export default {
       isDragging: false,
       isLoading: false,
       uploadProgress: 0,
+      processingProgress: 0,
+      backendLogs: [],
       logs: [],
       backendAvailable: false,
       success: false,
+      progressInterval: null,
+      logInterval: null,
+      videoId: null,
     };
   },
   computed: {
@@ -212,6 +233,36 @@ export default {
       }
       return this.backendAvailable;
     },
+    startProcessingProgress() {
+      this.processingProgress = 0;
+      const totalTime = 120000; // 2 минуты
+      const intervalTime = 2000; // Обновление каждые 2 секунды
+      const increment = (intervalTime / totalTime) * 100; // Процент за интервал
+      this.progressInterval = setInterval(() => {
+        if (this.processingProgress < 100) {
+          this.processingProgress = Math.min(this.processingProgress + increment + (Math.random() * increment * 0.5), 99);
+        }
+      }, intervalTime);
+    },
+    stopProcessingProgress() {
+      if (this.progressInterval) {
+        clearInterval(this.progressInterval);
+        this.progressInterval = null;
+      }
+      this.processingProgress = 100;
+    },
+    async fetchBackendLogs() {
+      if (!this.videoId) return;
+      try {
+        const response = await axios.get(`/api/logs?video_id=${this.videoId}`, {
+          timeout: 5000,
+          headers: { 'X-Debug': 'log-request' },
+        });
+        this.backendLogs = response.data.logs;
+      } catch (error) {
+        this.log(`Ошибка получения логов: ${error.message}`, 'error');
+      }
+    },
     async uploadVideo() {
       if (!this.file) {
         this.status = 'Ошибка: Файл не выбран';
@@ -222,6 +273,8 @@ export default {
       this.isLoading = true;
       this.status = 'Проверка соединения...';
       this.uploadProgress = 0;
+      this.backendLogs = [];
+      this.videoId = null;
       this.success = false;
       const startTime = Date.now();
       this.log(`Начало загрузки файла: ${this.file.name}, размер: ${(this.file.size / 1024 / 1024).toFixed(2)} МБ`);
@@ -233,6 +286,9 @@ export default {
         return;
       }
 
+      // Запускаем получение логов каждую секунду
+      this.logInterval = setInterval(() => this.fetchBackendLogs(), 1000);
+
       const formData = new FormData();
       formData.append('file', this.file);
       formData.append('filename', this.file.name);
@@ -240,7 +296,7 @@ export default {
       try {
         this.log('Отправка POST-запроса на /api/upload');
         const response = await axios.post('/api/upload', formData, {
-          timeout: 120000,
+          timeout: 180000,
           headers: {
             'Content-Type': 'multipart/form-data',
             'X-Debug': 'upload-request',
@@ -249,11 +305,20 @@ export default {
             const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
             this.uploadProgress = percent;
             this.log(`Прогресс загрузки: ${percent}%, время: ${Date.now() - startTime} мс`);
+            if (percent === 100) {
+              this.startProcessingProgress();
+            }
           },
         });
 
+        this.videoId = response.data.video_id;
+        this.stopProcessingProgress();
+        clearInterval(this.logInterval);
         this.log(`Ответ получен: ${response.status} ${response.statusText}, время: ${Date.now() - startTime} мс`);
         this.log(`Данные ответа: ${JSON.stringify(response.data)}`);
+        if (response.data.report_path.includes(response.data.video_id)) {
+          this.log('Использован кэшированный отчёт', 'info');
+        }
 
         const reportId = response.data.report_path.split('/').pop().replace('_report.txt', '');
         const reportUrl = `/api/report/${reportId}`;
@@ -265,15 +330,28 @@ export default {
         });
         this.log(`Отчет получен: ${reportResponse.status} ${reportResponse.statusText}, время: ${Date.now() - startTime} мс`);
         this.report = reportResponse.data;
-        this.success = true; // Устанавливаем success для зелёной зоны
-        this.status = ''; // Очищаем статус
+        this.success = true;
+
+        // Сохраняем в историю
+        const videoData = {
+          id: uuidv4(),
+          filename: this.file.name,
+          date: new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+          status: 'Успех',
+          videoUrl: URL.createObjectURL(this.file),
+        };
+        this.$emit('video-processed', videoData);
+
+        this.status = '';
       } catch (error) {
+        this.stopProcessingProgress();
+        clearInterval(this.logInterval);
         let errorMessage = 'Неизвестная ошибка';
         if (error.response) {
           errorMessage = `Сервер ответил ошибкой: ${error.response.status} ${error.response.statusText}`;
           this.log(`Ошибка ответа: ${JSON.stringify(error.response.data)}`, 'error');
         } else if (error.request) {
-          errorMessage = 'Сервер не ответил вовремя. Обработка может занять до минуты, пожалуйста, подождите.';
+          errorMessage = 'Сервер не ответил вовремя. Обработка может занять до 3 минут, пожалуйста, подождите.';
           this.log(`Ошибка: Нет ответа от сервера (${error.code || 'нет кода'})`, 'error');
         } else {
           errorMessage = error.message;
@@ -283,10 +361,25 @@ export default {
         this.log(`Полная ошибка: ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`, 'error');
         this.log(`Конфигурация запроса: ${JSON.stringify(error.config)}`, 'error');
         this.log(`Время ошибки: ${Date.now() - startTime} мс`, 'error');
+
+        // Сохраняем в историю с ошибкой
+        const videoData = {
+          id: uuidv4(),
+          filename: this.file.name,
+          date: new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+          status: 'Ошибка',
+          videoUrl: URL.createObjectURL(this.file),
+        };
+        this.$emit('video-processed', videoData);
       } finally {
         this.isLoading = false;
         this.uploadProgress = 0;
+        this.backendLogs = [];
+        this.videoId = null;
       }
+    },
+    deleteVideo(id) {
+      this.$emit('delete-video', id);
     },
   },
   async mounted() {
