@@ -1,7 +1,7 @@
-import logging
-import uuid
 import hashlib
+import logging
 from pathlib import Path
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -62,9 +62,11 @@ except Exception as e:
     logger.error(f"Ошибка инициализации моделей: {e}")
     raise
 
+
 def calculate_md5(content: bytes) -> str:
     """Вычисляет MD5-хэш содержимого файла."""
     return hashlib.md5(content).hexdigest()
+
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
@@ -134,6 +136,7 @@ async def upload_video(file: UploadFile = File(...)):
     logger.info(f"Запрос успешно обработан, отчёт: {report_path}")
     return {"report_path": str(report_path), "video_id": video_hash}
 
+
 @app.get("/api/report/{report_id}")
 async def get_report(report_id: str):
     report_path = REPORTS_DIR / f"{report_id}_report.txt"
@@ -146,10 +149,12 @@ async def get_report(report_id: str):
     logger.info(f"Отправка отчёта: {report_path}")
     return FileResponse(report_path)
 
+
 @app.get("/api/health")
 async def health_check():
     logger.info("Проверка состояния сервера")
     return {"status": "healthy"}
+
 
 @app.delete("/api/clear-cache")
 async def clear_cache():
@@ -169,6 +174,7 @@ async def clear_cache():
     except Exception as e:
         logger.error(f"Ошибка при очистке кэша: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка очистки кэша: {str(e)}")
+
 
 @app.get("/api/logs")
 async def get_logs(video_id: str = None):

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 from scipy.spatial import cKDTree
+from sklearn.cluster import DBSCAN
 from src.utils.logging import setup_logging
 from tqdm import tqdm
 
@@ -25,13 +26,13 @@ VIDEO_DIR = "videos"
 MOCK_DATA_PATH = "Starbucks_predictions.json"
 OUTPUT_FILE = "ad_quality_report.txt"
 MIN_SIZE_RATIO = 0.003
-MIN_AREA = 2000
+MIN_AREA = 1000
 MAX_AREA = 200000
 MIN_CONFIDENCE = 0.7
-ALLOWED_CLASSES = [4]
+ALLOWED_CLASSES = [0, 1, 2, 3, 4]
 IOU_THRESHOLD = 0.2
 MERGE_IOU_THRESHOLD = 0.15
-MAX_TIME_GAP_SECONDS = 4.0
+MAX_TIME_GAP_SECONDS = 1.0
 MIN_DURATION = 0.05
 FRAME_SKIP = 5
 MAX_CACHE_SIZE = 10
@@ -164,7 +165,7 @@ class BBoxValidator:
     def is_valid(bbox: Dict, frame_width: int, frame_height: int, confidence: float, class_id: int) -> bool:
         size = bbox["width"] * bbox["height"]
         size_norm = size / (frame_width * frame_height) if frame_width * frame_height > 0 else 0
-        return (
+        valid = (
             bbox["x"] >= 0
             and bbox["y"] >= 0
             and bbox["x"] + bbox["width"] <= frame_width
@@ -177,6 +178,13 @@ class BBoxValidator:
             and confidence >= MIN_CONFIDENCE
             and class_id in ALLOWED_CLASSES
         )
+        if not valid:
+            logging.info(
+                f"Невалидный bbox: x={bbox['x']}, y={bbox['y']}, width={bbox['width']}, height={bbox['height']}, "
+                f"size={size}, size_norm={size_norm}, confidence={confidence}, class_id={class_id}, "
+                f"frame_width={frame_width}, frame_height={frame_height}"
+            )
+        return valid
 
 
 class BBoxMetrics:
@@ -215,53 +223,100 @@ class BBoxMetrics:
 
 
 class AdAnalyzer:
-    @staticmethod
-    def analyze(frame: np.ndarray, bbox: BBox, frame_width: int, frame_height: int, group_id: int) -> AdMetrics:
-        if (
-            bbox.x < 0
-            or bbox.y < 0
-            or bbox.width <= 0
-            or bbox.height <= 0
-            or bbox.x + bbox.width > frame_width
-            or bbox.y + bbox.height > frame_height
-        ):
-            logging.warning(f"Некорректный bbox для группы {group_id}: {bbox.__dict__}")
-            return AdMetrics(0.0, 0.0, "не определено", 0.0)
+    def __init__(self, original_frame_width: int, original_frame_height: int):
+        """
+        Инициализация анализатора рекламы.
 
-        padding = 0.2
-        x_start = max(0, bbox.x - int(bbox.width * padding))
-        y_start = max(0, bbox.y - int(bbox.height * padding))
-        x_end = min(frame_width, bbox.x + bbox.width + int(bbox.width * padding))
-        y_end = min(frame_height, bbox.y + bbox.height + int(bbox.height * padding))
-        ad_region = frame[y_start:y_end, x_start:x_end]
+        Args:
+            original_frame_width (int): Оригинальная ширина кадра (например, 1280).
+            original_frame_height (int): Оригинальная высота кадра (например, 720).
+        """
+        self.original_frame_width = original_frame_width
+        self.original_frame_height = original_frame_height
+        self.padding = 0.2  # Отступ для анализа области вокруг bbox
 
-        if ad_region.size == 0 or ad_region.shape[0] < 2 or ad_region.shape[1] < 2:
-            logging.warning(f"Пустая область рекламы для группы {group_id}, bbox: {bbox.__dict__}")
-            ad_region = frame[bbox.y : bbox.y + bbox.height, bbox.x : bbox.x + bbox.width]
-            if ad_region.size == 0:
-                logging.error(f"Не удалось получить область рекламы для группы {group_id}")
-                return AdMetrics(0.0, 0.0, "не определено", 0.0)
+    def analyze(self, frame, bbox):
+        """
+        Анализирует кадр и bbox для получения метрик рекламы.
 
-        size = bbox.width * bbox.height
-        size_norm = size / (frame_width * frame_height)
-        center_x = bbox.x + bbox.width / 2
-        pos_score = 1 if abs(center_x - frame_width / 2) < 0.2 * frame_width else 0
-        pos_label = "центр" if pos_score else "периферия"
+        Args:
+            frame (np.ndarray): Кадр в формате RGB.
+            bbox (dict): Словарь с ключами 'x', 'y', 'width', 'height'.
 
-        gray = cv2.cvtColor(ad_region, cv2.COLOR_BGR2GRAY)
-        min_intensity = np.min(gray)
-        max_intensity = np.max(gray)
-        contrast_norm = (
-            0.0 if max_intensity == min_intensity else (max_intensity - min_intensity) / (max_intensity + min_intensity)
+        Returns:
+            dict: Метрики рекламы (size_norm, contrast_norm, position_score, pos_label).
+        """
+        import cv2
+        import numpy as np
+
+        # Извлечение координат и размеров bbox
+        x, y, width, height = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
+
+        # Рассчитываем нормализованный размер (size_norm) с использованием оригинальных размеров кадра
+        size = width * height
+        frame_area = self.original_frame_width * self.original_frame_height
+        size_norm = size / frame_area if frame_area > 0 else 0.0
+
+        # Рассчитываем позицию (центр или периферия)
+        center_x = x + width / 2
+        center_y = y + height / 2
+        pos_score = (
+            1.0
+            if (
+                abs(center_x - self.original_frame_width / 2) < 0.2 * self.original_frame_width
+                and abs(center_y - self.original_frame_height / 2) < 0.2 * self.original_frame_height
+            )
+            else 0.5
         )
-        contrast_norm = min(contrast_norm, 1.0)
+        pos_label = "центр" if pos_score == 1.0 else "периферия"
 
-        return AdMetrics(size_norm, pos_score, pos_label, contrast_norm)
+        # Определяем область для анализа контрастности (с padding)
+        x_start = max(0, int(x - width * self.padding))
+        y_start = max(0, int(y - height * self.padding))
+        x_end = min(frame.shape[1], int(x + width * (1 + self.padding)))
+        y_end = min(frame.shape[0], int(y + height * (1 + self.padding)))
+
+        # Проверяем, что область не пуста
+        if x_end <= x_start or y_end <= y_start:
+            contrast_norm = 0.0
+        else:
+            # Извлекаем область для анализа
+            ad_region = frame[y_start:y_end, x_start:x_end]
+            if ad_region.size == 0:
+                contrast_norm = 0.0
+            else:
+                # Преобразуем в градации серого для анализа контрастности
+                gray = cv2.cvtColor(ad_region, cv2.COLOR_RGB2GRAY)
+                min_intensity = np.min(gray)
+                max_intensity = np.max(gray)
+                contrast_norm = (max_intensity - min_intensity) / (max_intensity + min_intensity + 1e-6)
+
+        return {
+            "size_norm": size_norm,
+            "contrast_norm": contrast_norm,
+            "position_score": pos_score,
+            "pos_label": pos_label,
+        }
 
     @staticmethod
-    def evaluate_quality(metrics: AdMetrics, duration: float) -> AdQuality:
+    def evaluate_quality(metrics, duration: float):
+        """
+        Оценивает качество рекламы на основе метрик и длительности.
+
+        Args:
+            metrics (dict): Метрики из метода analyze.
+            duration (float): Длительность группы в секундах.
+
+        Returns:
+            AdQuality: Объект с оценкой качества, меткой и рекомендацией.
+        """
         duration_norm = min(duration / 3, 1.0)
-        score = 0.3 * metrics.size_norm + 0.3 * metrics.pos_score + 0.2 * metrics.contrast_norm + 0.2 * duration_norm
+        score = (
+            0.3 * metrics["size_norm"]
+            + 0.3 * metrics["position_score"]
+            + 0.2 * metrics["contrast_norm"]
+            + 0.2 * duration_norm
+        )
         if score < 0.5:
             label = "низкое"
             recommendation = "Увеличьте размер, контрастность или длительность."
@@ -279,11 +334,11 @@ class AdGroupProcessor:
         self.frame_rate = frame_rate
         self.frame_width = frame_width
         self.frame_height = frame_height
+        self.max_time_gap_seconds = 2.0  # Увеличено с 1.0 до 2.0
 
     def group_ads(self, frames_data: List[Dict]) -> List[AdGroup]:
         validator = BBoxValidator()
         metrics = BBoxMetrics()
-        ad_groups = []
         valid_bboxes = []
         for frame_data in frames_data:
             frame_id = frame_data["frame_id"]
@@ -297,30 +352,35 @@ class AdGroupProcessor:
                     valid_bboxes.append((frame_id, bbox))
                 else:
                     logging.debug(f"Отфильтрован некорректный bbox: {bbox}")
-        if valid_bboxes:
-            centers = np.array([[b[1]["x"] + b[1]["width"] / 2, b[1]["y"] + b[1]["height"] / 2] for b in valid_bboxes])
-            tree = cKDTree(centers)
-            for i, (frame_id, bbox) in enumerate(valid_bboxes):
-                found_group = False
-                indices = tree.query_ball_point([bbox["x"] + bbox["width"] / 2, bbox["y"] + bbox["height"] / 2], r=200)
-                for j in indices:
-                    if j >= i:
-                        continue
-                    other_frame_id, other_bbox = valid_bboxes[j]
-                    if metrics.calculate_iou(bbox, other_bbox) > IOU_THRESHOLD:
-                        for group in ad_groups:
-                            if any(
-                                f[0] == other_frame_id and metrics.calculate_iou(f[1], other_bbox) > IOU_THRESHOLD
-                                for f in group.frames
-                            ):
-                                group.frames.append((frame_id, bbox))
-                                found_group = True
-                                break
-                        if found_group:
-                            break
-                if not found_group:
-                    ad_groups.append(AdGroup(metrics.to_bbox(bbox), [(frame_id, bbox)]))
-        logging.info(f"Сформировано {len(ad_groups)} начальных групп")
+
+        if not valid_bboxes:
+            return []
+
+        # Пространственно-временная кластеризация с DBSCAN
+        features = np.array(
+            [
+                [
+                    frame_id / self.frame_rate,  # Время в секундах
+                    bbox["x"] + bbox["width"] / 2,  # Центр по x
+                    bbox["y"] + bbox["height"] / 2,  # Центр по y
+                ]
+                for frame_id, bbox in valid_bboxes
+            ]
+        )
+        # Нормализация для DBSCAN
+        features = (features - features.mean(axis=0)) / (features.std(axis=0) + 1e-6)
+        clustering = DBSCAN(eps=0.5, min_samples=3).fit(features)
+        labels = clustering.labels_
+
+        ad_groups = []
+        for label in set(labels):
+            if label == -1:  # Пропускаем шум
+                continue
+            group_frames = [(frame_id, bbox) for (frame_id, bbox), l in zip(valid_bboxes, labels) if l == label]
+            if group_frames:
+                ad_groups.append(AdGroup(metrics.max_bbox(group_frames), group_frames))
+
+        logging.info(f"Сформировано {len(ad_groups)} групп с DBSCAN")
         return self.merge_groups(ad_groups)
 
     def merge_groups(self, ad_groups: List[AdGroup]) -> List[AdGroup]:
@@ -345,7 +405,8 @@ class AdGroupProcessor:
         return merged_groups
 
     def process_groups(self, groups: List[AdGroup], video_processor: VideoProcessor, filename: str) -> List[str]:
-        analyzer = AdAnalyzer()
+        # Инициализируем AdAnalyzer с оригинальными размерами кадра
+        analyzer = AdAnalyzer(original_frame_width=self.frame_width, original_frame_height=self.frame_height)
         results = []
         for group_id, group in enumerate(tqdm(groups, desc="Анализ групп рекламы")):
             frame_ids = [f[0] for f in group.frames]
@@ -357,16 +418,15 @@ class AdGroupProcessor:
             if frame is None:
                 logging.warning(f"Не удалось обработать группу {group_id}: кадр не прочитан")
                 continue
-            scaled_bbox = video_processor.scale_bbox(group.bbox)
-            metrics = analyzer.analyze(
-                frame, scaled_bbox, video_processor.scale_width, video_processor.scale_height, group_id
-            )
+            # Используем оригинальный bbox без масштабирования, так как size_norm рассчитывается в оригинальных координатах
+            bbox = group.bbox.__dict__
+            metrics = analyzer.analyze(frame, bbox)
             quality = analyzer.evaluate_quality(metrics, duration)
             result = (
                 f"Реклама в видео {filename}:\n"
-                f"  - Положение: {metrics.pos_label}\n"
-                f"  - Размер: {metrics.size_norm:.2%} от кадра\n"
-                f"  - Контрастность: {metrics.contrast_norm:.2f}\n"
+                f"  - Положение: {metrics['pos_label']}\n"
+                f"  - Размер: {metrics['size_norm']:.2%} от кадра\n"
+                f"  - Контрастность: {metrics['contrast_norm']:.2f}\n"
                 f"  - Длительность: {duration:.1f} сек\n"
                 f"  - Оценка качества: {quality.label} (балл: {quality.score:.2f})\n"
                 f"  - Рекомендация: {quality.recommendation}\n"
@@ -374,7 +434,7 @@ class AdGroupProcessor:
             results.append(result)
             logging.info(
                 f"Группа {group_id}: кадры {min(frame_ids)}-{max(frame_ids)}, "
-                f"длительность {duration:.1f} сек, размер {metrics.size_norm:.2%}"
+                f"длительность {duration:.1f} сек, размер {metrics['size_norm']:.2%}"
             )
         return results
 
@@ -384,6 +444,7 @@ class AdQualityAnalyzer:
         self.results = []
         self.debug_dir = debug_dir
         os.makedirs(self.debug_dir, exist_ok=True)
+        self.frame_rate = None  # Инициализируем frame_rate как None
 
     def process_video(self, video_path: str, predictions_path: str, filename: str) -> List[str]:
         try:
@@ -391,6 +452,8 @@ class AdQualityAnalyzer:
             if not video_processor.initialize():
                 logging.error("Не удалось инициализировать видео")
                 return []
+            # Сохраняем frame_rate из video_processor
+            self.frame_rate = video_processor.frame_rate
             with open(predictions_path, "r", encoding="utf-8") as f:
                 video_data = json.load(f)[0]
             group_processor = AdGroupProcessor(
@@ -406,9 +469,35 @@ class AdQualityAnalyzer:
 
     def save_report(self, results: List[str], output_file: str):
         try:
+            if self.frame_rate is None or self.frame_rate <= 0:
+                logging.error("Frame rate не определён или некорректен")
+                raise ValueError("Frame rate не установлен")
+
+            # Сохраняем текстовый отчёт
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write("Отчет по качеству отображения рекламы\n\n")
                 f.write("\n".join(results))
+            # Сохраняем JSON для отладки
+            json_report = []
+            for i, r in enumerate(results):
+                try:
+                    # Извлекаем номера кадров из строки лога
+                    frame_info = r.split("Длительность:")[0].split("кадры ")[1]
+                    start_frame = float(frame_info.split("-")[0])
+                    end_frame = float(frame_info.split("-")[1].split(",")[0])
+                    json_report.append(
+                        {
+                            "group_id": i,
+                            "details": r.split("\n")[1:],
+                            "start_time": start_frame / self.frame_rate,
+                            "end_time": end_frame / self.frame_rate,
+                        }
+                    )
+                except (IndexError, ValueError) as e:
+                    logging.warning(f"Ошибка парсинга кадра для группы {i}: {str(e)}")
+                    continue
+            with open(output_file.replace(".txt", ".json"), "w", encoding="utf-8") as f:
+                json.dump(json_report, f, indent=2, ensure_ascii=False)
             logging.info(f"Отчет сохранен: {len(results)} записей")
         except Exception as e:
             logging.error(f"Ошибка сохранения отчета {output_file}: {str(e)}")

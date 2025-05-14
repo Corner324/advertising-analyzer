@@ -3,6 +3,8 @@ import os
 
 import cv2
 from ultralytics import YOLO
+import logging
+logger = logging.getLogger(__name__)
 
 
 class YoloDetector:
@@ -11,16 +13,16 @@ class YoloDetector:
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         self.conf_threshold = 0.7
-        self.min_bbox_area = 4000
+        self.min_bbox_area = 1000  # Сменил с 4к до 1к | By Corner
         self.max_bbox_area = 150000
-        self.allowed_classes = [4]  # Starbucks
+        self.allowed_classes = [0, 1, 2, 3, 4]  # ['Mercedes', 'Nike', 'Pringles', 'RedBull', 'Starbucks']
 
     def predict_video(self, video_path: str, output_json: str) -> bool:
         if not os.path.isfile(video_path):
-            print(f"Файл {video_path} не найден.")
+            logger.info(f"Файл {video_path} не найден.")
             return False
 
-        print(f"Обработка видео: {os.path.basename(video_path)}...")
+        logger.info(f"Обработка видео: {os.path.basename(video_path)}...")
         results = self.model.predict(source=video_path, conf=self.conf_threshold, save=False, verbose=False)
 
         video_data = {"video_id": os.path.basename(video_path), "frames": []}
@@ -33,7 +35,7 @@ class YoloDetector:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
             ret, frame = cap.read()
             if not ret:
-                print(f"Не удалось прочитать кадр {frame_id}")
+                logger.info(f"Не удалось прочитать кадр {frame_id}")
                 continue
 
             for box in result.boxes:
@@ -42,7 +44,7 @@ class YoloDetector:
                 cls = int(box.cls[0].item())
 
                 if cls not in self.allowed_classes:
-                    print(f"Кадр {frame_id}: Пропущен bbox, class_id={cls}")
+                    logger.info(f"Кадр {frame_id}: Пропущен bbox, class_id={cls}")
                     continue
 
                 bbox = {
@@ -54,7 +56,7 @@ class YoloDetector:
 
                 area = bbox["width"] * bbox["height"]
                 if area < self.min_bbox_area or area > self.max_bbox_area:
-                    print(f"Кадр {frame_id}: Пропущен bbox, area={area}")
+                    logger.info(f"Кадр {frame_id}: Пропущен bbox, area={area}")
                     continue
 
                 ad = {"type": "direct", "bbox": bbox, "confidence": round(conf, 2), "class_id": cls}
@@ -78,5 +80,5 @@ class YoloDetector:
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump([video_data], f, indent=2)
 
-        print(f"Предсказания сохранены в {output_json}")
+        logger.info(f"Предсказания сохранены в {output_json}")
         return True

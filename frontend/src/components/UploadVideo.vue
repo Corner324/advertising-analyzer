@@ -84,6 +84,11 @@
         </p>
       </div>
 
+      <!-- Сообщение о дополнительном ожидании -->
+      <p v-if="showWaitMessage" class="mt-4 text-sm text-gray-600 text-center">
+        Обработка может занять дополнительное время, пожалуйста, подождите.
+      </p>
+
       <!-- Экран ожидания -->
       <div v-if="isLoading" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
         <div class="bg-white rounded-xl p-8 flex flex-col items-center shadow-lg w-full max-w-2xl">
@@ -160,6 +165,8 @@ export default {
       progressInterval: null,
       logInterval: null,
       videoId: null,
+      showWaitMessage: false, // Новое состояние для сообщения ожидания
+      processingTimeout: null, // Таймер для 5 минут
     };
   },
   computed: {
@@ -191,6 +198,7 @@ export default {
       this.report = '';
       this.uploadProgress = 0;
       this.success = false;
+      this.showWaitMessage = false;
       this.log(`Файл выбран: ${file?.name}, размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     },
     handleDrop(event) {
@@ -206,6 +214,7 @@ export default {
       this.report = '';
       this.uploadProgress = 0;
       this.success = false;
+      this.showWaitMessage = false;
       this.log(`Файл перетащен: ${file?.name}, размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     },
     clearFile() {
@@ -214,6 +223,7 @@ export default {
       this.report = '';
       this.uploadProgress = 0;
       this.success = false;
+      this.showWaitMessage = false;
       this.log('Файл удалён');
     },
     async checkBackend() {
@@ -235,8 +245,8 @@ export default {
     },
     startProcessingProgress() {
       this.processingProgress = 0;
-      const totalTime = 120000; // 2 минуты
-      const intervalTime = 2000; // Обновление каждые 2 секунды
+      const totalTime = 300000; // 5 минут
+      const intervalTime = 1000; // Обновление каждую 1 секунду
       const increment = (intervalTime / totalTime) * 100; // Процент за интервал
       this.progressInterval = setInterval(() => {
         if (this.processingProgress < 100) {
@@ -248,6 +258,10 @@ export default {
       if (this.progressInterval) {
         clearInterval(this.progressInterval);
         this.progressInterval = null;
+      }
+      if (this.processingTimeout) {
+        clearTimeout(this.processingTimeout);
+        this.processingTimeout = null;
       }
       this.processingProgress = 100;
     },
@@ -276,6 +290,7 @@ export default {
       this.backendLogs = [];
       this.videoId = null;
       this.success = false;
+      this.showWaitMessage = false;
       const startTime = Date.now();
       this.log(`Начало загрузки файла: ${this.file.name}, размер: ${(this.file.size / 1024 / 1024).toFixed(2)} МБ`);
 
@@ -289,6 +304,12 @@ export default {
       // Запускаем получение логов каждую секунду
       this.logInterval = setInterval(() => this.fetchBackendLogs(), 1000);
 
+      // Устанавливаем таймер на 5 минут для отображения сообщения ожидания
+      this.processingTimeout = setTimeout(() => {
+        this.showWaitMessage = true;
+        this.log('Истекло 5 минут обработки, отображено сообщение ожидания', 'info');
+      }, 300000); // 5 минут
+
       const formData = new FormData();
       formData.append('file', this.file);
       formData.append('filename', this.file.name);
@@ -296,7 +317,7 @@ export default {
       try {
         this.log('Отправка POST-запроса на /api/upload');
         const response = await axios.post('/api/upload', formData, {
-          timeout: 180000,
+          timeout: 300000, // Увеличено до 5 минут
           headers: {
             'Content-Type': 'multipart/form-data',
             'X-Debug': 'upload-request',
@@ -314,6 +335,7 @@ export default {
         this.videoId = response.data.video_id;
         this.stopProcessingProgress();
         clearInterval(this.logInterval);
+        this.showWaitMessage = false; // Сбрасываем сообщение, так как обработка завершена
         this.log(`Ответ получен: ${response.status} ${response.statusText}, время: ${Date.now() - startTime} мс`);
         this.log(`Данные ответа: ${JSON.stringify(response.data)}`);
         if (response.data.report_path.includes(response.data.video_id)) {
@@ -346,12 +368,13 @@ export default {
       } catch (error) {
         this.stopProcessingProgress();
         clearInterval(this.logInterval);
+        this.showWaitMessage = false;
         let errorMessage = 'Неизвестная ошибка';
         if (error.response) {
           errorMessage = `Сервер ответил ошибкой: ${error.response.status} ${error.response.statusText}`;
           this.log(`Ошибка ответа: ${JSON.stringify(error.response.data)}`, 'error');
         } else if (error.request) {
-          errorMessage = 'Сервер не ответил вовремя. Обработка может занять до 3 минут, пожалуйста, подождите.';
+          errorMessage = 'Сервер не ответил вовремя. Обработка может занять дополнительное время, пожалуйста, подождите.';
           this.log(`Ошибка: Нет ответа от сервера (${error.code || 'нет кода'})`, 'error');
         } else {
           errorMessage = error.message;

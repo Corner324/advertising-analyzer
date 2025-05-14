@@ -16,6 +16,7 @@ ultralytics = "8.3.13"
 torch = { version = "2.4.1", source = "pytorch-cpu" }
 torchvision = { version = "0.19.1", source = "pytorch-cpu" }
 scipy = "^1.15.2"
+scikit-learn = "^1.6.1"
 
 [[tool.poetry.source]]
 name = "pytorch-cpu"
