@@ -8,6 +8,7 @@ __pycache__/
 
 /predictions/*.json
 /reports/*.txt
+/reports/*.json
 /videos/*.mp4
 /debug_frames/*.jpg
 

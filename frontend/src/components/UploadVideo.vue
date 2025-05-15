@@ -119,8 +119,9 @@
         <div class="flex justify-between items-center mb-4">
           <h3 class="text-2xl font-semibold text-gray-900">Результаты анализа</h3>
           <button
-            class="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2 rounded-lg opacity-50 cursor-not-allowed"
-            :disabled="true"
+            class="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 transition-all duration-200"
+            :disabled="!report"
+            @click="saveToPDF"
           >
             Сохранить в PDF
           </button>
@@ -141,6 +142,7 @@
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
 import { v4 as uuidv4 } from 'uuid';
+import jsPDF from 'jspdf';
 
 axiosRetry(axios, {
   retries: 3,
@@ -165,8 +167,8 @@ export default {
       progressInterval: null,
       logInterval: null,
       videoId: null,
-      showWaitMessage: false, // Новое состояние для сообщения ожидания
-      processingTimeout: null, // Таймер для 5 минут
+      showWaitMessage: false,
+      processingTimeout: null,
     };
   },
   computed: {
@@ -183,9 +185,14 @@ export default {
       const logEntry = `[${new Date().toISOString()}] ${type.toUpperCase()}: ${message}`;
       console.log(logEntry);
       this.logs.push(logEntry);
-      localStorage.setItem('appLogs', JSON.stringify(this.logs));
+      try {
+        localStorage.setItem('appLogs', JSON.stringify(this.logs));
+      } catch (e) {
+        console.error(`Ошибка сохранения логов в localStorage: ${e.message}`);
+      }
     },
     handleFileUpload(event) {
+      this.log('Обработка выбора файла');
       const file = event.target.files[0];
       if (file && file.size > 500 * 1024 * 1024) {
         this.status = 'Ошибка: Файл слишком большой (максимум 500 МБ)';
@@ -202,6 +209,7 @@ export default {
       this.log(`Файл выбран: ${file?.name}, размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     },
     handleDrop(event) {
+      this.log('Обработка перетаскивания файла');
       const file = event.dataTransfer.files[0];
       if (file && file.size > 500 * 1024 * 1024) {
         this.status = 'Ошибка: Файл слишком большой (максимум 500 МБ)';
@@ -218,6 +226,7 @@ export default {
       this.log(`Файл перетащен: ${file?.name}, размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     },
     clearFile() {
+      this.log('Очистка файла');
       this.file = null;
       this.status = '';
       this.report = '';
@@ -227,8 +236,8 @@ export default {
       this.log('Файл удалён');
     },
     async checkBackend() {
-      const startTime = Date.now();
       this.log('Проверка доступности бэкенда: /api/health');
+      const startTime = Date.now();
       try {
         const response = await axios.get('/api/health', {
           timeout: 5000,
@@ -244,10 +253,11 @@ export default {
       return this.backendAvailable;
     },
     startProcessingProgress() {
+      this.log('Запуск прогресса обработки');
       this.processingProgress = 0;
-      const totalTime = 300000; // 5 минут
-      const intervalTime = 1000; // Обновление каждую 1 секунду
-      const increment = (intervalTime / totalTime) * 100; // Процент за интервал
+      const totalTime = 300000;
+      const intervalTime = 1000;
+      const increment = (intervalTime / totalTime) * 100;
       this.progressInterval = setInterval(() => {
         if (this.processingProgress < 100) {
           this.processingProgress = Math.min(this.processingProgress + increment + (Math.random() * increment * 0.5), 99);
@@ -255,6 +265,7 @@ export default {
       }, intervalTime);
     },
     stopProcessingProgress() {
+      this.log('Остановка прогресса обработки');
       if (this.progressInterval) {
         clearInterval(this.progressInterval);
         this.progressInterval = null;
@@ -267,17 +278,20 @@ export default {
     },
     async fetchBackendLogs() {
       if (!this.videoId) return;
+      this.log(`Запрос логов для videoId: ${this.videoId}`);
       try {
         const response = await axios.get(`/api/logs?video_id=${this.videoId}`, {
           timeout: 5000,
           headers: { 'X-Debug': 'log-request' },
         });
         this.backendLogs = response.data.logs;
+        this.log(`Получено логов: ${response.data.logs.length}`);
       } catch (error) {
         this.log(`Ошибка получения логов: ${error.message}`, 'error');
       }
     },
     async uploadVideo() {
+      this.log('Начало загрузки видео');
       if (!this.file) {
         this.status = 'Ошибка: Файл не выбран';
         this.log('Попытка загрузки без файла', 'error');
@@ -291,6 +305,7 @@ export default {
       this.videoId = null;
       this.success = false;
       this.showWaitMessage = false;
+      this.report = '';
       const startTime = Date.now();
       this.log(`Начало загрузки файла: ${this.file.name}, размер: ${(this.file.size / 1024 / 1024).toFixed(2)} МБ`);
 
@@ -301,14 +316,12 @@ export default {
         return;
       }
 
-      // Запускаем получение логов каждую секунду
       this.logInterval = setInterval(() => this.fetchBackendLogs(), 1000);
 
-      // Устанавливаем таймер на 5 минут для отображения сообщения ожидания
       this.processingTimeout = setTimeout(() => {
         this.showWaitMessage = true;
         this.log('Истекло 5 минут обработки, отображено сообщение ожидания', 'info');
-      }, 300000); // 5 минут
+      }, 300000);
 
       const formData = new FormData();
       formData.append('file', this.file);
@@ -317,7 +330,7 @@ export default {
       try {
         this.log('Отправка POST-запроса на /api/upload');
         const response = await axios.post('/api/upload', formData, {
-          timeout: 300000, // Увеличено до 5 минут
+          timeout: 300000,
           headers: {
             'Content-Type': 'multipart/form-data',
             'X-Debug': 'upload-request',
@@ -335,7 +348,7 @@ export default {
         this.videoId = response.data.video_id;
         this.stopProcessingProgress();
         clearInterval(this.logInterval);
-        this.showWaitMessage = false; // Сбрасываем сообщение, так как обработка завершена
+        this.showWaitMessage = false;
         this.log(`Ответ получен: ${response.status} ${response.statusText}, время: ${Date.now() - startTime} мс`);
         this.log(`Данные ответа: ${JSON.stringify(response.data)}`);
         if (response.data.report_path.includes(response.data.video_id)) {
@@ -343,6 +356,7 @@ export default {
         }
 
         const reportId = response.data.report_path.split('/').pop().replace('_report.txt', '');
+        this.log(`Формирование reportId: ${reportId}`);
         const reportUrl = `/api/report/${reportId}`;
         this.log(`Запрос отчета: ${reportUrl}`);
 
@@ -350,11 +364,11 @@ export default {
           timeout: 30000,
           headers: { 'X-Debug': 'report-request' },
         });
-        this.log(`Отчет получен: ${reportResponse.status} ${reportResponse.statusText}, время: ${Date.now() - startTime} мс`);
+        this.log(`Отчет получен: ${reportResponse.status} ${response.statusText}, время: ${Date.now() - startTime} мс`);
+        this.log(`Содержимое отчёта: ${reportResponse.data}`);
         this.report = reportResponse.data;
         this.success = true;
 
-        // Сохраняем в историю
         const videoData = {
           id: uuidv4(),
           filename: this.file.name,
@@ -385,7 +399,6 @@ export default {
         this.log(`Конфигурация запроса: ${JSON.stringify(error.config)}`, 'error');
         this.log(`Время ошибки: ${Date.now() - startTime} мс`, 'error');
 
-        // Сохраняем в историю с ошибкой
         const videoData = {
           id: uuidv4(),
           filename: this.file.name,
@@ -399,9 +412,108 @@ export default {
         this.uploadProgress = 0;
         this.backendLogs = [];
         this.videoId = null;
+        this.log('Завершение загрузки видео');
+      }
+    },
+    async saveToPDF() {
+      this.log('Начало генерации PDF отчёта');
+      try {
+        // Проверка отчёта
+        this.log(`formatReport: ${JSON.stringify(this.formatReport)}`);
+        if (!this.formatReport || !this.formatReport.length) {
+          this.log('Ошибка: отчёт пустой', 'error');
+          this.status = 'Ошибка: Отчёт пустой';
+          return;
+        }
+
+        this.log('Инициализация jsPDF');
+        const doc = new jsPDF({
+          orientation: 'portrait',
+          unit: 'mm',
+          format: 'a4',
+        });
+
+        // Загрузка шрифта
+        this.log('Попытка загрузки шрифта /fonts/NotoSans-Regular.ttf');
+        const fontResponse = await fetch('/fonts/NotoSans-Regular.ttf');
+        this.log(`Статус ответа шрифта: ${fontResponse.status}`);
+        if (!fontResponse.ok) {
+          this.log(`Не удалось загрузить шрифт: ${fontResponse.statusText}`, 'error');
+          this.log('Использование шрифта helvetica как запасного', 'warning');
+          doc.setFont('helvetica', 'normal');
+        } else {
+          const fontArrayBuffer = await fontResponse.arrayBuffer();
+          this.log(`Шрифт загружен, размер: ${fontArrayBuffer.byteLength} байт`);
+
+          // Конвертация в base64 без переполнения стека
+          const fontBytes = new Uint8Array(fontArrayBuffer);
+          let binary = '';
+          const chunkSize = 8192; // Обрабатываем по частям
+          for (let i = 0; i < fontBytes.length; i += chunkSize) {
+            const chunk = fontBytes.subarray(i, i + chunkSize);
+            binary += String.fromCharCode.apply(null, chunk);
+          }
+          const base64String = btoa(binary);
+          this.log('Шрифт конвертирован в base64');
+
+          // Добавление шрифта в VFS
+          this.log('Добавление шрифта в VFS');
+          doc.addFileToVFS('NotoSans-Regular.ttf', base64String);
+          doc.addFont('NotoSans-Regular.ttf', 'NotoSans', 'normal');
+          doc.setFont('NotoSans');
+          this.log('Шрифт установлен: NotoSans');
+        }
+
+        // Параметры страницы
+        const margin = 15;
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const maxLineWidth = pageWidth - 2 * margin;
+        let y = margin;
+
+        // Заголовок
+        this.log('Добавление заголовка');
+        doc.setFontSize(16);
+        doc.text('Отчет по качеству отображения рекламы', margin, y, { maxWidth: maxLineWidth });
+        y += 10;
+
+        // Разделитель
+        this.log('Добавление разделителя');
+        doc.setLineWidth(0.5);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 10;
+
+        // Текст отчёта
+        this.log('Добавление текста отчёта');
+        doc.setFontSize(12);
+        this.formatReport.forEach((item, index) => {
+          if (y > doc.internal.pageSize.getHeight() - 20) {
+            this.log(`Добавление новой страницы, текущая y: ${y}`);
+            doc.addPage();
+            y = margin;
+          }
+          const lines = doc.splitTextToSize(item, maxLineWidth);
+          this.log(`Обработка секции ${index + 1}, строк: ${lines.length}`);
+          doc.text(lines, margin, y);
+          y += lines.length * 7 + 5;
+          if (index < this.formatReport.length - 1) {
+            doc.setLineWidth(0.2);
+            doc.line(margin, y, pageWidth - margin, y);
+            y += 5;
+          }
+        });
+
+        // Сохранение файла
+        this.log('Сохранение PDF');
+        const filename = this.file ? this.file.name.replace(/\.[^/.]+$/, '') : 'report';
+        doc.save(`${filename}_report.pdf`);
+        this.log(`PDF успешно сохранён: ${filename}_report.pdf`);
+      } catch (error) {
+        this.log(`Ошибка генерации PDF: ${error.message}, stack: ${error.stack}`, 'error');
+        this.status = 'Ошибка: Не удалось сохранить PDF';
       }
     },
     deleteVideo(id) {
+      this.log(`Удаление видео с id: ${id}`);
       this.$emit('delete-video', id);
     },
   },
@@ -410,6 +522,7 @@ export default {
     const savedLogs = localStorage.getItem('appLogs');
     if (savedLogs) {
       this.logs = JSON.parse(savedLogs);
+      this.log(`Загружено ${this.logs.length} сохранённых логов`);
     }
     await this.checkBackend();
   },
