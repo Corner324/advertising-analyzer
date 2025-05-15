@@ -129,7 +129,7 @@
         <div class="bg-gray-50 p-6 rounded-lg shadow-inner">
           <div v-for="(item, index) in formatReport" :key="index" class="mb-6 last:mb-0">
             <div class="border-l-4 border-blue-600 pl-4">
-              <p v-for="line in item.split('\n')" :key="line" class="text-gray-700 leading-relaxed">{{ line }}</p>
+              <p v-for="line in item.text.split('\n')" :key="line" class="text-gray-700 leading-relaxed">{{ line }}</p>
             </div>
           </div>
         </div>
@@ -173,11 +173,30 @@ export default {
   },
   computed: {
     formatReport() {
-      if (!this.file) return this.report.split('\n\n').filter(item => item.trim());
+      if (!this.report) return [];
+      const items = this.report.split('\n\n').filter(item => item.trim());
       const regex = /Реклама в видео [0-9a-f-]+\.mp4/;
-      return this.report.split('\n\n').filter(item => item.trim()).map(item =>
-        item.replace(regex, `Реклама в видео ${this.file.name}`)
-      );
+      // Временные start_time с интервалами, пока нет данных от бэкенда
+      let currentTime = 2.0; // Начало первой рекламы
+      return items.map((item, index) => {
+        const text = this.file ? item.replace(regex, `Реклама в видео ${this.file.name}`) : item;
+        // Парсинг duration из текста
+        let duration = 0;
+        const durationMatch = item.match(/Длительность: ([\d.]+) сек/);
+        if (durationMatch) {
+          duration = parseFloat(durationMatch[1]);
+        }
+        // Парсинг start_time (если будет в отчёте)
+        let start_time = currentTime;
+        const startTimeMatch = item.match(/Начало: ([\d.]+) сек/);
+        if (startTimeMatch) {
+          start_time = parseFloat(startTimeMatch[1]);
+        }
+        // Обновляем currentTime для следующей рекламы
+        currentTime += duration + 4.0; // Интервал 4 сек между рекламой
+        this.log(`Секция ${index + 1}: start_time=${start_time}, duration=${duration}`);
+        return { text, start_time, duration };
+      });
     },
   },
   methods: {
@@ -444,20 +463,15 @@ export default {
         } else {
           const fontArrayBuffer = await fontResponse.arrayBuffer();
           this.log(`Шрифт загружен, размер: ${fontArrayBuffer.byteLength} байт`);
-
-          // Конвертация в base64 без переполнения стека
           const fontBytes = new Uint8Array(fontArrayBuffer);
           let binary = '';
-          const chunkSize = 8192; // Обрабатываем по частям
+          const chunkSize = 8192;
           for (let i = 0; i < fontBytes.length; i += chunkSize) {
             const chunk = fontBytes.subarray(i, i + chunkSize);
             binary += String.fromCharCode.apply(null, chunk);
           }
           const base64String = btoa(binary);
           this.log('Шрифт конвертирован в base64');
-
-          // Добавление шрифта в VFS
-          this.log('Добавление шрифта в VFS');
           doc.addFileToVFS('NotoSans-Regular.ttf', base64String);
           doc.addFont('NotoSans-Regular.ttf', 'NotoSans', 'normal');
           doc.setFont('NotoSans');
@@ -469,6 +483,8 @@ export default {
         const pageWidth = doc.internal.pageSize.getWidth();
         const maxLineWidth = pageWidth - 2 * margin;
         let y = margin;
+        // Предполагаемая длина видео
+        const videoDuration = 30; // в секундах
 
         // Заголовок
         this.log('Добавление заголовка');
@@ -482,19 +498,54 @@ export default {
         doc.line(margin, y, pageWidth - margin, y);
         y += 10;
 
-        // Текст отчёта
-        this.log('Добавление текста отчёта');
+        // Текст отчёта и таймлайн
+        this.log('Добавление текста отчёта и таймлайнов');
         doc.setFontSize(12);
         this.formatReport.forEach((item, index) => {
-          if (y > doc.internal.pageSize.getHeight() - 20) {
+          if (index === 0 && item.text.includes('Отчет по качеству')) {
+            // Пропускаем заголовок отчёта, он уже добавлен
+            return;
+          }
+          if (y > doc.internal.pageSize.getHeight() - 30) {
             this.log(`Добавление новой страницы, текущая y: ${y}`);
             doc.addPage();
             y = margin;
           }
-          const lines = doc.splitTextToSize(item, maxLineWidth);
-          this.log(`Обработка секции ${index + 1}, строк: ${lines.length}`);
+          // Текст группы
+          const lines = doc.splitTextToSize(item.text, maxLineWidth);
+          this.log(`Обработка секции ${index}: строк=${lines.length}, start_time=${item.start_time}, duration=${item.duration}`);
           doc.text(lines, margin, y);
-          y += lines.length * 7 + 5;
+          y += lines.length * 7;
+
+          // Таймлайн
+          if (item.start_time !== undefined && item.duration !== undefined && item.duration > 0) {
+            this.log(`Отрисовка таймлайна для секции ${index}: start_time=${item.start_time}, duration=${item.duration}`);
+            // Фон таймлайна (серая линия)
+            doc.setLineWidth(0.5);
+            doc.setDrawColor(200, 200, 200);
+            doc.setFillColor(200, 200, 200);
+            const timelineWidth = 150;
+            const timelineX = margin;
+            const timelineY = y + 2;
+            doc.line(timelineX, timelineY, timelineX + timelineWidth, timelineY);
+
+            // Полоса рекламы (синяя)
+            const startPercent = (item.start_time / videoDuration) * timelineWidth;
+            const durationPercent = Math.max((item.duration / videoDuration) * timelineWidth, 2); // Минимальная ширина 2 мм
+            doc.setFillColor(59, 130, 246); // Синий цвет
+            doc.rect(timelineX + startPercent, timelineY - 1, durationPercent, 2, 'F');
+
+            // Подписи времени
+            doc.setFontSize(10);
+            doc.setTextColor(0, 0, 0);
+            const startLabel = `${item.start_time.toFixed(1)} сек`;
+            const endLabel = `${(item.start_time + item.duration).toFixed(1)} сек`;
+            doc.text(startLabel, timelineX + startPercent, timelineY - 2);
+            if (durationPercent > 20) { // Показываем endLabel, если полоса длинная
+              doc.text(endLabel, timelineX + startPercent + durationPercent, timelineY - 2);
+            }
+            y += 10; // Отступ после таймлайна
+          }
           if (index < this.formatReport.length - 1) {
             doc.setLineWidth(0.2);
             doc.line(margin, y, pageWidth - margin, y);
