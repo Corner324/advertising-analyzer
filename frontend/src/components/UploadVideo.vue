@@ -123,7 +123,7 @@
             :disabled="!report"
             @click="saveToPDF"
           >
-            Сохранить в PDF
+            Скачать полный отчёт в PDF
           </button>
         </div>
         <div class="bg-gray-50 p-6 rounded-lg shadow-inner">
@@ -142,7 +142,7 @@
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
 import { v4 as uuidv4 } from 'uuid';
-import jsPDF from 'jspdf';
+import generateReportPDF from '@/utils/generateReportPDF';
 
 axiosRetry(axios, {
   retries: 3,
@@ -176,27 +176,26 @@ export default {
       if (!this.report) return [];
       const items = this.report.split('\n\n').filter(item => item.trim());
       const regex = /Реклама в видео [0-9a-f-]+\.mp4/;
-      // Временные start_time с интервалами, пока нет данных от бэкенда
-      let currentTime = 2.0; // Начало первой рекламы
-      return items.map((item, index) => {
+      let currentTime = 2.0;
+      const formatted = items.map((item, index) => {
         const text = this.file ? item.replace(regex, `Реклама в видео ${this.file.name}`) : item;
-        // Парсинг duration из текста
         let duration = 0;
         const durationMatch = item.match(/Длительность: ([\d.]+) сек/);
         if (durationMatch) {
           duration = parseFloat(durationMatch[1]);
         }
-        // Парсинг start_time (если будет в отчёте)
         let start_time = currentTime;
         const startTimeMatch = item.match(/Начало: ([\d.]+) сек/);
         if (startTimeMatch) {
           start_time = parseFloat(startTimeMatch[1]);
         }
-        // Обновляем currentTime для следующей рекламы
-        currentTime += duration + 4.0; // Интервал 4 сек между рекламой
-        this.log(`Секция ${index + 1}: start_time=${start_time}, duration=${duration}`);
+        currentTime += duration + 4.0;
         return { text, start_time, duration };
       });
+      formatted.forEach((item, index) => {
+        this.log(`Секция ${index + 1}: start_time=${item.start_time}, duration=${item.duration}`);
+      });
+      return formatted;
     },
   },
   methods: {
@@ -435,132 +434,18 @@ export default {
       }
     },
     async saveToPDF() {
-      this.log('Начало генерации PDF отчёта');
+      this.log('Запуск генерации PDF отчёта');
       try {
-        // Проверка отчёта
-        this.log(`formatReport: ${JSON.stringify(this.formatReport)}`);
         if (!this.formatReport || !this.formatReport.length) {
           this.log('Ошибка: отчёт пустой', 'error');
           this.status = 'Ошибка: Отчёт пустой';
           return;
         }
-
-        this.log('Инициализация jsPDF');
-        const doc = new jsPDF({
-          orientation: 'portrait',
-          unit: 'mm',
-          format: 'a4',
-        });
-
-        // Загрузка шрифта
-        this.log('Попытка загрузки шрифта /fonts/NotoSans-Regular.ttf');
-        const fontResponse = await fetch('/fonts/NotoSans-Regular.ttf');
-        this.log(`Статус ответа шрифта: ${fontResponse.status}`);
-        if (!fontResponse.ok) {
-          this.log(`Не удалось загрузить шрифт: ${fontResponse.statusText}`, 'error');
-          this.log('Использование шрифта helvetica как запасного', 'warning');
-          doc.setFont('helvetica', 'normal');
-        } else {
-          const fontArrayBuffer = await fontResponse.arrayBuffer();
-          this.log(`Шрифт загружен, размер: ${fontArrayBuffer.byteLength} байт`);
-          const fontBytes = new Uint8Array(fontArrayBuffer);
-          let binary = '';
-          const chunkSize = 8192;
-          for (let i = 0; i < fontBytes.length; i += chunkSize) {
-            const chunk = fontBytes.subarray(i, i + chunkSize);
-            binary += String.fromCharCode.apply(null, chunk);
-          }
-          const base64String = btoa(binary);
-          this.log('Шрифт конвертирован в base64');
-          doc.addFileToVFS('NotoSans-Regular.ttf', base64String);
-          doc.addFont('NotoSans-Regular.ttf', 'NotoSans', 'normal');
-          doc.setFont('NotoSans');
-          this.log('Шрифт установлен: NotoSans');
-        }
-
-        // Параметры страницы
-        const margin = 15;
-        const pageWidth = doc.internal.pageSize.getWidth();
-        const maxLineWidth = pageWidth - 2 * margin;
-        let y = margin;
-        // Предполагаемая длина видео
-        const videoDuration = 30; // в секундах
-
-        // Заголовок
-        this.log('Добавление заголовка');
-        doc.setFontSize(16);
-        doc.text('Отчет по качеству отображения рекламы', margin, y, { maxWidth: maxLineWidth });
-        y += 10;
-
-        // Разделитель
-        this.log('Добавление разделителя');
-        doc.setLineWidth(0.5);
-        doc.line(margin, y, pageWidth - margin, y);
-        y += 10;
-
-        // Текст отчёта и таймлайн
-        this.log('Добавление текста отчёта и таймлайнов');
-        doc.setFontSize(12);
-        this.formatReport.forEach((item, index) => {
-          if (index === 0 && item.text.includes('Отчет по качеству')) {
-            // Пропускаем заголовок отчёта, он уже добавлен
-            return;
-          }
-          if (y > doc.internal.pageSize.getHeight() - 30) {
-            this.log(`Добавление новой страницы, текущая y: ${y}`);
-            doc.addPage();
-            y = margin;
-          }
-          // Текст группы
-          const lines = doc.splitTextToSize(item.text, maxLineWidth);
-          this.log(`Обработка секции ${index}: строк=${lines.length}, start_time=${item.start_time}, duration=${item.duration}`);
-          doc.text(lines, margin, y);
-          y += lines.length * 7;
-
-          // Таймлайн
-          if (item.start_time !== undefined && item.duration !== undefined && item.duration > 0) {
-            this.log(`Отрисовка таймлайна для секции ${index}: start_time=${item.start_time}, duration=${item.duration}`);
-            // Фон таймлайна (серая линия)
-            doc.setLineWidth(0.5);
-            doc.setDrawColor(200, 200, 200);
-            doc.setFillColor(200, 200, 200);
-            const timelineWidth = 150;
-            const timelineX = margin;
-            const timelineY = y + 2;
-            doc.line(timelineX, timelineY, timelineX + timelineWidth, timelineY);
-
-            // Полоса рекламы (синяя)
-            const startPercent = (item.start_time / videoDuration) * timelineWidth;
-            const durationPercent = Math.max((item.duration / videoDuration) * timelineWidth, 2); // Минимальная ширина 2 мм
-            doc.setFillColor(59, 130, 246); // Синий цвет
-            doc.rect(timelineX + startPercent, timelineY - 1, durationPercent, 2, 'F');
-
-            // Подписи времени
-            doc.setFontSize(10);
-            doc.setTextColor(0, 0, 0);
-            const startLabel = `${item.start_time.toFixed(1)} сек`;
-            const endLabel = `${(item.start_time + item.duration).toFixed(1)} сек`;
-            doc.text(startLabel, timelineX + startPercent, timelineY - 2);
-            if (durationPercent > 20) { // Показываем endLabel, если полоса длинная
-              doc.text(endLabel, timelineX + startPercent + durationPercent, timelineY - 2);
-            }
-            y += 10; // Отступ после таймлайна
-          }
-          if (index < this.formatReport.length - 1) {
-            doc.setLineWidth(0.2);
-            doc.line(margin, y, pageWidth - margin, y);
-            y += 5;
-          }
-        });
-
-        // Сохранение файла
-        this.log('Сохранение PDF');
-        const filename = this.file ? this.file.name.replace(/\.[^/.]+$/, '') : 'report';
-        doc.save(`${filename}_report.pdf`);
-        this.log(`PDF успешно сохранён: ${filename}_report.pdf`);
+        await generateReportPDF(this.formatReport, this.file, this.log);
+        this.log('PDF успешно сгенерирован');
       } catch (error) {
-        this.log(`Ошибка генерации PDF: ${error.message}, stack: ${error.stack}`, 'error');
-        this.status = 'Ошибка: Не удалось сохранить PDF';
+        this.log(`Ошибка генерации PDF: ${error.message}`, 'error');
+        this.status = 'Ошибка: Не удалось создать PDF';
       }
     },
     deleteVideo(id) {
