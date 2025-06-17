@@ -12,10 +12,11 @@ Advertising Analyzer — это веб-приложение для анализ�
 * **Визуальная обратная связь** : Зона загрузки становится зелёной после успешного анализа (после удаления файла).
 * **Логи** : Подробные логи на фронтенде (в консоли и localStorage) и бэкенде (в файлах).
 
-![Интерфейс веб-сервиса](images/image1.png)
-![История загрузок](images/image2.png)
-![Интерфейс pdf-отчета](images/image3.png)
-
+<p float="left">
+  <img src="images/image1.png" width="300" />
+  <img src="images/image2.png" width="300" />
+  <img src="images/image3.png" width="300" />
+</p>
 
 ## Технологии
 
